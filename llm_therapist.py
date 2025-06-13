@@ -4,9 +4,6 @@ import tempfile
 import base64
 import json
 import numpy as np
-import sounddevice as sd
-import soundfile as sf
-import queue
 import whisper
 from dotenv import load_dotenv
 import openai  # Changed to use openai directly instead of OpenAI client
@@ -29,11 +26,6 @@ if not openai_api_key:
 
 # Client OpenAI for TTS (using openai directly)
 client = openai
-
-# Audio recording configuration
-SAMPLE_RATE = 16000
-CHANNELS = 1
-DTYPE = np.int16
 
 # =======================================================
 # NEW FUNCTION: Generate image with DALL·E 3 using requests
