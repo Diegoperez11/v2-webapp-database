@@ -11,3 +11,4 @@ streamlit-audiorecorder
 Pillow
 rich>=10.14.0,<14
 pymongo
+reportlab
