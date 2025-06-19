@@ -3,6 +3,7 @@ import PIL.Image
 import tempfile
 import soundfile as sf
 import os
+import uuid
 from audiorecorder import audiorecorder
 from datetime import datetime  
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -17,10 +18,7 @@ from llm_therapist import (
 from db_operations import (
     setup_database_indexes,
     save_message,
-    save_message_batch,  # New batch save function
-    load_user_sessions, 
-    load_session_messages,
-    create_session
+    save_message_batch
 )
 
 class ChatHandler:
@@ -49,19 +47,7 @@ class ChatHandler:
     def _ensure_database_setup(self):
         """Ensure database indexes exist for better performance - only once"""
         setup_database_indexes(self.db)
-    
-    def display_current_session_info(self):
-        """Display information about the current session"""
-        current_session = None
-        if hasattr(st.session_state, 'user_sessions'):
-            for session in st.session_state.user_sessions:
-                if session['session_id'] == st.session_state.current_session_id:
-                    current_session = session
-                    break
         
-        if current_session:
-            st.markdown(f"### {current_session['title']}")
-    
     def display_messages(self):
         """Display chat messages from history"""
         # Display chat messages from history
@@ -84,19 +70,23 @@ class ChatHandler:
                 st.markdown(audio_player, unsafe_allow_html=True)
             st.session_state.audio_response = None
     
-    def handle_submit(self):
+    def handle_submit(self, session_handler):
         """Handle form submission from text input"""
         if st.session_state.text_input.strip():
             user_message = st.session_state.text_input
             st.session_state.text_input = ""
-            self.process_user_message(user_message)
+            self.process_user_message(user_message, session_handler)
     
-    def handle_user_input(self, user_input):
+    def handle_user_input(self, user_input, session_handler):
         """Handle user text input - for compatibility with audio handler"""
-        self.process_user_message(user_input)
+        self.process_user_message(user_input, session_handler)
     
-    def process_user_message(self, user_input):
+    def process_user_message(self, user_input, session_handler):
         """Process user message through LLM and handle response"""
+        # Create session in database only when first message is sent
+        if not st.session_state.session_created_in_db:
+            session_handler.create_session_in_database()
+        
         # Add user message to UI messages
         st.session_state.messages.append({"role": "user", "content": user_input, "type": "text"})
         
@@ -143,9 +133,6 @@ class ChatHandler:
     def _save_messages_batch(self, messages):
         """Save multiple messages in a single batch operation"""
         try:
-            from datetime import datetime
-            import uuid
-            
             # Add UUIDs to messages
             for msg in messages:
                 if 'message_id' not in msg or not msg['message_id']:
@@ -158,7 +145,6 @@ class ChatHandler:
             for msg in messages:
                 save_message(self.db, msg['session_id'], msg['role'], msg['content'])
 
-
 class AudioHandler:
     """Handles audio recording and transcription using audiorecorder library"""
     
@@ -167,7 +153,7 @@ class AudioHandler:
         if "audio_last_len" not in st.session_state:
             st.session_state["audio_last_len"] = 0
     
-    def render_audio_input(self, chat_handler):
+    def render_audio_input(self, chat_handler, session_handler):
         """Render the audio input widget and handle recording"""
         # Use audiorecorder widget
         audio = audiorecorder("🎤", "🔴")
@@ -175,13 +161,13 @@ class AudioHandler:
         # Check if new audio was recorded
         if len(audio) > 0 and len(audio) != st.session_state["audio_last_len"]:
             st.session_state["audio_last_len"] = len(audio)
-            self._process_recorded_audio(audio, chat_handler)
+            self._process_recorded_audio(audio, chat_handler, session_handler)
         
         # Reset tracking when no audio
         if len(audio) == 0:
             st.session_state["audio_last_len"] = 0
     
-    def _process_recorded_audio(self, audio, chat_handler):
+    def _process_recorded_audio(self, audio, chat_handler, session_handler):
         """Process the recorded audio data"""
         temp_dir = tempfile.mkdtemp()
         temp_path = os.path.join(temp_dir, "temp_audio.wav")
@@ -204,7 +190,7 @@ class AudioHandler:
                     if transcribed_text and transcribed_text.strip():
                         st.info(f"Transcribed: {transcribed_text}")
                         # Process through chat handler
-                        chat_handler.process_user_message(transcribed_text)
+                        chat_handler.process_user_message(transcribed_text, session_handler)
                         st.rerun()
                     else:
                         st.error("No se pudo transcribir el audio. Por favor, inténtalo de nuevo.")
@@ -218,8 +204,7 @@ class AudioHandler:
                     os.remove(temp_path)
                 os.rmdir(temp_dir)
             except Exception:
-                pass
-    
+                pass 
 
 class SessionHandler:
     """Handles session management operations"""
@@ -228,77 +213,74 @@ class SessionHandler:
         self.db = db
     
     def reset_user_sessions(self):
-        """Reset session data when user changes"""
+        """Reset session data to start completely fresh"""
+        # Clear all session-related state completely
         st.session_state.sessions_loaded = False
+        st.session_state.current_session_id = None
+        st.session_state.messages = []
+        st.session_state.session_created_in_db = False
         
-        # Clear session-related state
-        session_keys_to_clear = ["user_sessions", "current_session_id", "messages", "chat_history"]
+        # Clear chat history completely
+        if "chat_history" in st.session_state:
+            del st.session_state["chat_history"]
+        
+        # Clear any other session-related keys
+        session_keys_to_clear = ["user_sessions", "chat_history"]
         for key in session_keys_to_clear:
             if key in st.session_state:
-                if key == "current_session_id":
-                    st.session_state[key] = None
-                elif key == "messages":
-                    st.session_state[key] = []
-                else:
-                    del st.session_state[key]
+                del st.session_state[key]
     
-    def load_user_sessions(self):
-        """Load sessions if not already loaded"""
-        if not st.session_state.sessions_loaded:
-            sessions = load_user_sessions(self.db, st.session_state.user_info["user_id"])
-            st.session_state.user_sessions = sessions
-            st.session_state.sessions_loaded = True
-    
-    def create_new_session(self):
-        """Create a new therapy session"""
-        session_id = create_session(self.db, st.session_state.user_info["user_id"])
+    def prepare_new_session(self):
+        """Prepare a new therapy session (generate ID but don't save to DB yet)"""
         
-        if session_id:
-            # Update session ID in session state
-            st.session_state.current_session_id = session_id
-            
-            # Clear messages for new session
-            st.session_state.messages = []
-            st.session_state.chat_history = ChatMessageHistory()
-            
-            # Re-add system prompt
+        # Generate session ID but don't save to database yet
+        session_id = str(uuid.uuid4())
+        st.session_state.current_session_id = session_id
+        
+        # Ensure messages list is completely empty
+        st.session_state.messages = []
+        
+        # Re-initialize chat history with system prompt
+        from langchain_community.chat_message_histories import ChatMessageHistory
+        from langchain.schema import SystemMessage
+        
+        st.session_state.chat_history = ChatMessageHistory()
+        
+        # Re-add system prompt
+        try:
             with open("system_prompt4.txt", "r", encoding="utf-8") as file:
                 system_prompt_content = file.read()
             st.session_state.chat_history.add_message(SystemMessage(content=system_prompt_content))
-            
-            # Reload sessions
-            st.session_state.sessions_loaded = False
+        except Exception as e:
+            st.error(f"Error loading system prompt: {str(e)}")
+        
+        # Reset sessions loaded flag
+        st.session_state.sessions_loaded = False
+        
+        # Mark that session is not yet created in database
+        st.session_state.session_created_in_db = False
     
-    def display_past_sessions(self):
-        """Display clickable past sessions in sidebar"""
-        if hasattr(st.session_state, 'user_sessions') and len(st.session_state.user_sessions) > 0:
-            # Show only recent sessions to avoid overwhelming the sidebar
-            recent_sessions = st.session_state.user_sessions[:10]  # Show last 10 sessions
-            
-            for session in recent_sessions:
-                session_button_label = f"{session['title']}"
-                if st.sidebar.button(session_button_label, key=f"session_{session['session_id']}"):
-                    self._switch_to_session(session['session_id'])
-                    st.rerun()
-        else:
-            st.sidebar.info("No past sessions found. Click 'Start New Session' to begin.")
-    
-    def _switch_to_session(self, session_id):
-        """Switch to a specific session"""
-        st.session_state.current_session_id = session_id
-        
-        # Load messages for this session
-        messages = load_session_messages(self.db, session_id)
-        
-        # Reset chat history with system prompt
-        st.session_state.chat_history = ChatMessageHistory()
-        with open("system_prompt4.txt", "r", encoding="utf-8") as file:
-            system_prompt_content = file.read()
-        st.session_state.chat_history.add_message(SystemMessage(content=system_prompt_content))
-        
-        # Set the UI messages
-        st.session_state.messages = messages
-
+    def create_session_in_database(self):
+        """Actually create the session in the database when first message is sent"""
+        if not st.session_state.session_created_in_db and st.session_state.current_session_id:
+            try:
+                # Create session in database using the pre-generated ID
+                from datetime import datetime
+                
+                new_session = {
+                    "session_id": st.session_state.current_session_id,
+                    "user_id": st.session_state.user_info["user_id"],
+                    "title": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                    "created_at": datetime.now(),
+                }
+                
+                self.db["sessions"].insert_one(new_session)
+                st.session_state.session_created_in_db = True
+                
+            except Exception as e:
+                st.error(f"Error creating session in database: {str(e)}")
+                # Generate a new session ID as fallback
+                st.session_state.current_session_id = str(uuid.uuid4())
 
 class UIRenderer:
     """Handles UI rendering components"""

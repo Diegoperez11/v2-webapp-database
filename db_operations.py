@@ -1,7 +1,6 @@
 from datetime import datetime
 import uuid
 import streamlit as st
-from bson.objectid import ObjectId
 
 def setup_database_indexes(db):
     """Set up MongoDB indexes for better query performance - only run once"""
@@ -28,13 +27,6 @@ def setup_database_indexes(db):
             
         except Exception as e:
             st.error(f"Error setting up indexes: {str(e)}")
-
-def _to_object_id(id_str):
-    """Convert string ID to ObjectId if possible"""
-    try:
-        return ObjectId(id_str) if id_str else None
-    except:
-        return id_str
 
 # ==================== MESSAGE OPERATIONS ====================
 
@@ -80,6 +72,15 @@ def load_session_messages(db, session_id):
         st.error(f"Error loading messages: {str(e)}")
         return []
 
+def delete_session_messages(db, session_id):
+    """Delete all messages for a specific session"""
+    try:
+        result = db["messages"].delete_many({"session_id": session_id})
+        return result.deleted_count
+    except Exception as e:
+        st.error(f"Error deleting messages: {str(e)}")
+        return 0
+
 # ==================== SESSION OPERATIONS ====================
 
 def create_session(db, user_id):
@@ -111,6 +112,34 @@ def load_user_sessions(db, user_id):
         st.error(f"Error loading sessions: {str(e)}")
         return []
 
+def delete_session(db, session_id):
+    """Delete a session and all its associated messages"""
+    try:
+        # First, delete all messages for this session
+        messages_deleted = delete_session_messages(db, session_id)
+        
+        # Then delete the session itself
+        session_result = db["sessions"].delete_one({"session_id": session_id})
+        
+        if session_result.deleted_count > 0:
+            return {
+                "success": True,
+                "session_deleted": True,
+                "messages_deleted": messages_deleted
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Session not found"
+            }
+            
+    except Exception as e:
+        st.error(f"Error deleting session: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 # ==================== USER OPERATIONS ====================
 
 def get_children(db):
@@ -123,42 +152,3 @@ def get_children(db):
     except Exception as e:
         st.error(f"Error loading children: {str(e)}")
         return []
-
-def get_user_info(db, user_id):
-    """Get user information by ID with optimized query"""
-    try:
-        obj_user_id = _to_object_id(user_id)
-        # Only get needed fields
-        return db["users"].find_one(
-            {"_id": obj_user_id},
-            {"password_hash": 0}  # Exclude password hash for security
-        )
-    except Exception as e:
-        st.error(f"Error getting user info: {str(e)}")
-        return None
-
-# ==================== CONNECTION OPTIMIZATION ====================
-
-@st.cache_resource
-def get_cached_db_connection():
-    """Cache database connection to avoid reconnecting on every operation"""
-    import pymongo
-    import os
-    from dotenv import load_dotenv
-
-    load_dotenv()  # Load environment variables from .env file
-
-    MONGODB_URI = os.getenv("MONGODB_URI")
-    client = pymongo.MongoClient(
-        MONGODB_URI,
-        # Add connection pooling and timeout settings for Atlas
-        maxPoolSize=10,  # Limit connection pool size
-        minPoolSize=1,
-        maxIdleTimeMS=30000,  # 30 seconds
-        waitQueueTimeoutMS=5000,  # 5 seconds
-        serverSelectionTimeoutMS=5000,  # 5 seconds
-        socketTimeoutMS=20000,  # 20 seconds
-        connectTimeoutMS=20000,  # 20 seconds
-        retryWrites=True
-    )
-    return client["asd-therapy"]

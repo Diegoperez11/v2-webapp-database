@@ -23,14 +23,14 @@ def display_child_page(db):
     # Initialize session states
     _initialize_session_states()
     
-    # Reset sessions when user changes
-    _handle_user_change(session_handler)
+    # Handle user change and prepare for fresh session (but don't create yet)
+    _handle_user_change_and_prepare_fresh(session_handler)
     
     # Create two-column layout
     col1, col2 = st.columns([1, 2], gap="small")
     
     # Render sidebar
-    _render_sidebar(session_handler)
+    _render_sidebar()
     
     # Column 1: Robot character
     with col1:
@@ -38,7 +38,7 @@ def display_child_page(db):
     
     # Column 2: Chat interface
     with col2:
-        _render_chat_section(chat_handler, audio_handler)
+        _render_chat_section(chat_handler, audio_handler, session_handler)
 
 def _initialize_session_states():
     """Initialize all required session states"""
@@ -50,44 +50,39 @@ def _initialize_session_states():
         "current_session_id": None,
         "sessions_loaded": False,
         "tts_enabled": True,
-        "messages": []  # Added messages initialization
+        "messages": [],  
+        "fresh_session_prepared": False,  # Track if fresh session was prepared for this login
+        "session_created_in_db": False    # Track if session exists in database
     }
     
     for state, default_value in required_states.items():
         if state not in st.session_state:
             st.session_state[state] = default_value
 
-def _handle_user_change(session_handler):
-    """Handle user change and reset session data"""
+def _handle_user_change_and_prepare_fresh(session_handler):
+    """Handle user change and prepare for a fresh session (but don't create in DB yet)"""
     current_user = st.session_state.user_info["user_id"]
     
+    # Check if user changed OR if we haven't prepared a fresh session yet
     if ("last_active_user" not in st.session_state or 
-        st.session_state.last_active_user != current_user):
+        st.session_state.last_active_user != current_user or
+        not st.session_state.fresh_session_prepared):
         
+        # Reset all session data
         session_handler.reset_user_sessions()
+        
+        # Prepare a new session (generate ID but don't save to DB yet)
+        session_handler.prepare_new_session()
+        
+        # Mark that we've prepared a fresh session for this user
         st.session_state.last_active_user = current_user
+        st.session_state.fresh_session_prepared = True
 
-def _render_sidebar(session_handler):
-    """Render the sidebar with user info, sessions, and settings"""
+def _render_sidebar():
+    """Render the sidebar with user info and settings (no conversation history)"""
     # User info
     st.sidebar.title(f"Welcome, {st.session_state.user_info.get('name', 'User')}")
     st.sidebar.write(f"Type: {st.session_state.user_info['user_type'].capitalize()}")
-    
-    # Session management
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("## Therapy Sessions")
-    
-    # Load and display sessions
-    session_handler.load_user_sessions()
-    
-    # New session button
-    if st.sidebar.button("➕ Start New Session"):
-        session_handler.create_new_session()
-        st.rerun()
-    
-    # Display past sessions
-    st.sidebar.markdown("### Past Sessions")
-    session_handler.display_past_sessions()
     
     # Settings section
     st.sidebar.markdown("---")
@@ -102,18 +97,14 @@ def _render_sidebar(session_handler):
     # Logout button
     st.sidebar.markdown("---")
     if st.sidebar.button("Logout"):
+        # Reset session flags on logout
+        st.session_state.fresh_session_prepared = False
+        st.session_state.session_created_in_db = False
         logout()
         st.rerun()
 
-def _render_chat_section(chat_handler, audio_handler):
+def _render_chat_section(chat_handler, audio_handler, session_handler):
     """Render the main chat interface"""
-    # Check if we have an active session
-    if st.session_state.current_session_id is None:
-        st.info("👋 Welcome! Please start a new therapy session using the sidebar.")
-        return
-    
-    # Show current session info
-    chat_handler.display_current_session_info()
     
     # Display chat messages
     chat_handler.display_messages()
@@ -130,8 +121,8 @@ def _render_chat_section(chat_handler, audio_handler):
             st.text_input(
                 "Escribe tu mensaje aquí...",
                 key="text_input",
-                on_change=lambda: chat_handler.handle_submit()
+                on_change=lambda: chat_handler.handle_submit(session_handler)
             )
         
         with col2:
-            audio_handler.render_audio_input(chat_handler)
+            audio_handler.render_audio_input(chat_handler, session_handler)

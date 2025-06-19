@@ -3,7 +3,8 @@ from auth import logout
 from db_operations import (
     get_children, 
     load_user_sessions, 
-    load_session_messages
+    load_session_messages,
+    delete_session
 )
 from pdf_generator import PDFGenerator
 
@@ -17,13 +18,13 @@ def display_staff_page(db):
     
     # Main content
     st.title("Staff Dashboard")
-    st.write("View client conversations and download as PDF")
+    st.write("View client conversations, download as PDF, and manage sessions")
     
     # Fix: Pass the db parameter instead of undefined db_ops
     display_conversations(db)
 
 def display_conversations(db):
-    """Display client conversations with download functionality"""
+    """Display client conversations with download and delete functionality"""
     try:
         # Get all children - Fix: Use db parameter directly
         children = get_children(db)
@@ -55,6 +56,9 @@ def display_conversations(db):
         
         st.write(f"**Conversations for {selected_client}:**")
         
+        # Display sessions count
+        st.write(f"Total sessions: {len(sessions)}")
+        
         for session in sessions:
             if not session.get("session_id"):
                 continue
@@ -80,15 +84,92 @@ def display_conversations(db):
                         elif role == "assistant":
                             st.markdown(f"**Therapist:** {content}")
                     
-                    # PDF download button
+                    # Action buttons in columns
                     st.markdown("---")
-                    if st.button(f"📄 Download PDF", key=f"pdf_{session_id}"):
-                        generate_pdf(messages, selected_client, session_title)
+                    col1, col2, col3 = st.columns([1, 1, 2])
+                    
+                    with col1:
+                        # PDF download button
+                        if st.button(f"📄 Download PDF", key=f"pdf_{session_id}"):
+                            generate_pdf(messages, selected_client, session_title)
+                    
+                    with col2:
+                        # Delete button with confirmation
+                        if st.button(f"🗑️ Delete Session", key=f"delete_{session_id}", type="secondary"):
+                            # Store the session to delete in session state for confirmation
+                            st.session_state[f"confirm_delete_{session_id}"] = True
+                            st.rerun()
+                    
+                    # Confirmation dialog
+                    if st.session_state.get(f"confirm_delete_{session_id}", False):
+                        st.warning("⚠️ **Are you sure you want to delete this session?**")
+                        st.write("This action will permanently delete:")
+                        st.write(f"- Session: {session_title}")
+                        st.write(f"- All {len(messages)} messages in this session")
+                        st.write("**This action cannot be undone!**")
+                        
+                        col_confirm, col_cancel = st.columns([1, 1])
+                        
+                        with col_confirm:
+                            if st.button("✅ Yes, Delete", key=f"confirm_yes_{session_id}", type="primary"):
+                                handle_session_deletion(db, session_id, session_title)
+                                
+                        with col_cancel:
+                            if st.button("❌ Cancel", key=f"confirm_no_{session_id}"):
+                                # Remove confirmation state
+                                if f"confirm_delete_{session_id}" in st.session_state:
+                                    del st.session_state[f"confirm_delete_{session_id}"]
+                                st.rerun()
                 else:
                     st.info("No messages found")
                     
+                    # Even empty sessions can be deleted
+                    st.markdown("---")
+                    if st.button(f"🗑️ Delete Empty Session", key=f"delete_empty_{session_id}", type="secondary"):
+                        st.session_state[f"confirm_delete_{session_id}"] = True
+                        st.rerun()
+                    
+                    # Confirmation for empty sessions
+                    if st.session_state.get(f"confirm_delete_{session_id}", False):
+                        st.warning("⚠️ **Delete this empty session?**")
+                        
+                        col_confirm, col_cancel = st.columns([1, 1])
+                        
+                        with col_confirm:
+                            if st.button("✅ Yes, Delete", key=f"confirm_yes_empty_{session_id}", type="primary"):
+                                handle_session_deletion(db, session_id, session_title)
+                                
+                        with col_cancel:
+                            if st.button("❌ Cancel", key=f"confirm_no_empty_{session_id}"):
+                                if f"confirm_delete_{session_id}" in st.session_state:
+                                    del st.session_state[f"confirm_delete_{session_id}"]
+                                st.rerun()
+                    
     except Exception as e:
         st.error(f"Error: {str(e)}")
+
+def handle_session_deletion(db, session_id, session_title):
+    """Handle the session deletion process"""
+    try:
+        with st.spinner("Deleting session..."):
+            result = delete_session(db, session_id)
+            
+        if result["success"]:
+            st.success(f"✅ Session deleted successfully!")
+            st.info(f"Deleted session '{session_title}' and {result['messages_deleted']} messages")
+            
+            # Clear confirmation state
+            if f"confirm_delete_{session_id}" in st.session_state:
+                del st.session_state[f"confirm_delete_{session_id}"]
+            
+            # Refresh the page to show updated session list
+            st.rerun()
+            
+        else:
+            st.error(f"❌ Failed to delete session: {result.get('error', 'Unknown error')}")
+            
+    except Exception as e:
+        st.error(f"❌ Error during deletion: {str(e)}")
 
 def generate_pdf(messages, client_name, session_title):
     """Generate and provide PDF download"""
